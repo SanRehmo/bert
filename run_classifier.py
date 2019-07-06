@@ -25,6 +25,9 @@ import modeling
 import optimization
 import tokenization
 import tensorflow as tf
+from tensorflow.python.ops import variable_scope
+from tensorflow.python.ops import array_ops
+from tensorflow.python.framework import ops
 
 from ast import literal_eval
 
@@ -636,6 +639,71 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
     return (loss, per_example_loss, logits, probabilities)
 
+def metric_variable(shape, dtype, validate_shape=True, name=None):
+    """Create variable in `GraphKeys.(LOCAL|METRIC_VARIABLES`) collections."""
+
+    return variable_scope.variable(
+        lambda: array_ops.zeros(shape, dtype),
+        trainable=False,
+        collections=[ops.GraphKeys.LOCAL_VARIABLES, ops.GraphKeys.METRIC_VARIABLES],
+        validate_shape=validate_shape,
+        name=name,
+    )
+
+def streaming_counts(y_true, y_pred, num_classes):
+
+    y_true = tf.cast(y_true, tf.int64)
+    y_pred = tf.cast(y_pred, tf.int64)
+
+    # Weights for the weighted f1 score
+    weights = metric_variable(
+        shape=[num_classes], dtype=tf.int64, validate_shape=False, name="weights"
+    )
+    # Counts for the macro f1 score
+    tp_mac = metric_variable(
+        shape=[num_classes], dtype=tf.int64, validate_shape=False, name="tp_mac"
+    )
+    fp_mac = metric_variable(
+        shape=[num_classes], dtype=tf.int64, validate_shape=False, name="fp_mac"
+    )
+    fn_mac = metric_variable(
+        shape=[num_classes], dtype=tf.int64, validate_shape=False, name="fn_mac"
+    )
+    # Counts for the micro f1 score
+    tp_mic = metric_variable(
+        shape=[], dtype=tf.int64, validate_shape=False, name="tp_mic"
+    )
+    fp_mic = metric_variable(
+        shape=[], dtype=tf.int64, validate_shape=False, name="fp_mic"
+    )
+    fn_mic = metric_variable(
+        shape=[], dtype=tf.int64, validate_shape=False, name="fn_mic"
+    )
+
+    # Update ops, as in the previous section:
+    #   - Update ops for the macro f1 score
+    up_tp_mac = tf.assign_add(tp_mac, tf.count_nonzero(y_pred * y_true, axis=0))
+    up_fp_mac = tf.assign_add(fp_mac, tf.count_nonzero(y_pred * (y_true - 1), axis=0))
+    up_fn_mac = tf.assign_add(fn_mac, tf.count_nonzero((y_pred - 1) * y_true, axis=0))
+
+    #   - Update ops for the micro f1 score
+    up_tp_mic = tf.assign_add(
+        tp_mic, tf.count_nonzero(y_pred * y_true, axis=None)
+    )
+    up_fp_mic = tf.assign_add(
+        fp_mic, tf.count_nonzero(y_pred * (y_true - 1), axis=None)
+    )
+    up_fn_mic = tf.assign_add(
+        fn_mic, tf.count_nonzero((y_pred - 1) * y_true, axis=None)
+    )
+    # Update op for the weights, just summing
+    up_weights = tf.assign_add(weights, tf.reduce_sum(y_true, axis=0))
+
+    # Grouping values
+    counts = (tp_mac, fp_mac, fn_mac, tp_mic, fp_mic, fn_mic, weights)
+    updates = tf.group(up_tp_mic, up_fp_mic, up_fn_mic, up_tp_mac, up_fp_mac, up_fn_mac, up_weights)
+
+    return counts, updates
 
 def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
@@ -706,13 +774,19 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
 
       def metric_fn(per_example_loss, label_ids, probabilities, is_real_example):
 
-        correct_prediction = tf.equal(tf.round(tf.cast(logits, tf.float32)),
-                                       tf.round(tf.cast(label_ids, tf.float32)))
-        accuracy = tf.metrics.accuracy(label_ids, probabilities)
+        # define metrics to strean
         loss = tf.metrics.mean(per_example_loss)
+        accuracy = tf.metrics.accuracy(label_ids, probabilities)
+        precision = tf.metrics.precision(label_ids, probabilities)
+        recall = tf.metrics.recall(label_ids, probabilities)
+        f1 = streaming_counts(label_ids, probabilities, 6)
+
         return {
-            "accuracy": accuracy,
             "eval_loss": loss,
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "F1": f1
         }
 
       eval_metrics = (metric_fn,
