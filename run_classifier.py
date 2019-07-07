@@ -370,13 +370,11 @@ class ColaProcessor(DataProcessor):
       guid = "%s-%s" % (set_type, i)
       if set_type == "test":
         text_a = tokenization.convert_to_unicode(line[1])
-        label = ["0"]*6
+        label = str([0]*6)
       else:
         if (len(line) < 4):
             continue
         else:
-            if (line[3] == '"""'):
-                continue
             text_a = tokenization.convert_to_unicode(line[3])
             label = tokenization.convert_to_unicode(line[1])
       examples.append(
@@ -772,14 +770,17 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
           scaffold_fn=scaffold_fn)
     elif mode == tf.estimator.ModeKeys.EVAL:
 
-      def metric_fn(per_example_loss, label_ids, probabilities, is_real_example):
+      def metric_fn(per_example_loss, label_ids, logits, is_real_example):
 
         # define metrics to strean
-        loss = tf.metrics.mean(per_example_loss)
-        accuracy = tf.metrics.accuracy(label_ids, probabilities)
-        precision = tf.metrics.precision(label_ids, probabilities)
-        recall = tf.metrics.recall(label_ids, probabilities)
-        f1 = streaming_counts(label_ids, probabilities, 6)
+        loss = tf.metrics.mean(per_example_loss, weights=is_real_example)
+        # accuracy = tf.metrics.accuracy(label_ids, probabilities)
+        # predictions = tf.argmax(logits, axis=-1, output_type=tf.int32)
+        accuracy = tf.metrics.accuracy(
+            labels=label_ids, predictions=logits, weights=is_real_example)
+        precision = tf.metrics.precision(label_ids, logits)
+        recall = tf.metrics.recall(label_ids, logits)
+        f1 = streaming_counts(label_ids, logits, 6)
 
         return {
             "eval_loss": loss,
@@ -790,7 +791,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
         }
 
       eval_metrics = (metric_fn,
-                      [per_example_loss, label_ids, probabilities, is_real_example])
+                      [per_example_loss, label_ids, logits, is_real_example])
       output_spec = tf.contrib.tpu.TPUEstimatorSpec(
           mode=mode,
           loss=total_loss,
@@ -799,7 +800,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
     else:
       output_spec = tf.contrib.tpu.TPUEstimatorSpec(
           mode=mode,
-          predictions={"probabilities": probabilities},
+          predictions=probabilities,
           scaffold_fn=scaffold_fn)
     return output_spec
 
@@ -1034,16 +1035,19 @@ def main(_):
       while len(predict_examples) % FLAGS.predict_batch_size != 0:
         predict_examples.append(PaddingInputExample())
 
+
+    print("CHECK CHECK")
     predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
     file_based_convert_examples_to_features(predict_examples, label_list,
                                             FLAGS.max_seq_length, tokenizer,
                                             predict_file)
 
-    tf.logging.info("***** Running prediction*****")
-    tf.logging.info("  Num examples = %d (%d actual, %d padding)",
+    print("***** Running prediction*****")
+    print("  Num examples = %d (%d actual, %d padding)",
                     len(predict_examples), num_actual_predict_examples,
                     len(predict_examples) - num_actual_predict_examples)
-    tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+    print("  Batch size = %d", FLAGS.predict_batch_size)
+
 
     predict_drop_remainder = True if FLAGS.use_tpu else False
     predict_input_fn = file_based_input_fn_builder(
@@ -1057,7 +1061,7 @@ def main(_):
     output_predict_file = os.path.join(FLAGS.output_dir, "test_results.tsv")
     with tf.gfile.GFile(output_predict_file, "w") as writer:
       num_written_lines = 0
-      tf.logging.info("***** Predict results *****")
+      print("***** Predict results *****")
       for prediction in result:
         output_line = "\t".join(
             str(class_probability) for class_probability in prediction) + "\n"
