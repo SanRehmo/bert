@@ -80,6 +80,10 @@ flags.DEFINE_bool(
     "do_predict", False,
     "Whether to run the model in inference mode on the test set.")
 
+flags.DEFINE_bool(
+    "do_export", False,
+    "Whether to export the model to a TF Serving compatible format.")
+
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
 flags.DEFINE_integer("eval_batch_size", 8, "Total batch size for eval.")
@@ -608,7 +612,6 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
   labels = tf.cast(labels, tf.float32)
 
-
   output_layer = model.get_pooled_output()
 
   hidden_size = output_layer.shape[-1].value
@@ -878,6 +881,18 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
     features.append(feature)
   return features
 
+def serving_input_fn():
+    label_ids = tf.placeholder(tf.int32, [None, 6], name='label_ids')
+    input_ids = tf.placeholder(tf.int32, [None, FLAGS.max_seq_length], name='input_ids')
+    input_mask = tf.placeholder(tf.int32, [None, FLAGS.max_seq_length], name='input_mask')
+    segment_ids = tf.placeholder(tf.int32, [None, FLAGS.max_seq_length], name='segment_ids')
+    input_fn = tf.estimator.export.build_raw_serving_input_receiver_fn({
+        'label_ids': label_ids,
+        'input_ids': input_ids,
+        'input_mask': input_mask,
+        'segment_ids': segment_ids,
+    })()
+    return input_fn
 
 def main(_):
   tf.logging.set_verbosity(tf.logging.INFO)
@@ -892,7 +907,7 @@ def main(_):
   tokenization.validate_case_matches_checkpoint(FLAGS.do_lower_case,
                                                 FLAGS.init_checkpoint)
 
-  if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_predict:
+  if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_predict and not FLAGS.do_export:
     raise ValueError(
         "At least one of `do_train`, `do_eval` or `do_predict' must be True.")
 
@@ -962,6 +977,7 @@ def main(_):
       train_batch_size=FLAGS.train_batch_size,
       eval_batch_size=FLAGS.eval_batch_size,
       predict_batch_size=FLAGS.predict_batch_size)
+
 
   if FLAGS.do_train:
     train_file = os.path.join(FLAGS.output_dir, "train.tf_record")
@@ -1066,6 +1082,10 @@ def main(_):
         output_line = "\t".join(
             str(class_probability) for class_probability in prediction) + "\n"
         writer.write(output_line)
+
+  if FLAGS.do_export:
+    estimator._export_to_tpu = False
+    estimator.export_savedmodel("C:\\Users\\Christian\\code\\toxic_bert\\serving_output", serving_input_fn)
 
     # assert num_written_lines == num_actual_predict_examples
 
